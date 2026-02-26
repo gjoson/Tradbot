@@ -1,0 +1,55 @@
+[Unit]
+Description=Tradbot - Automated Options Trading System
+After=network-online.target
+Wants=network-online.target
+
+# Restart on failure
+StartLimitInterval=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# User and group  
+User=tradbot
+Group=tradbot
+
+# Working directory
+WorkingDirectory=/opt/tradbot
+
+# Environment variables
+Environment="PATH=/opt/tradbot/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+Environment="FLATTRADE_USER="
+Environment="FLATTRADE_PASSWORD="
+Environment="FLATTRADE_API_KEY="
+Environment="FLATTRADE_API_SECRET="
+Environment="LOG_LEVEL=INFO"
+Environment="LOG_DIR=/var/log/tradbot"
+Environment="LOG_DB_PATH=/var/lib/tradbot/trades.db"
+Environment="STATE_FILE_PATH=/var/lib/tradbot/state.json"
+Environment="DRY_RUN=false"
+
+# Execution
+ExecStart=/opt/tradbot/venv/bin/python /opt/tradbot/main.py
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tradbot
+
+# Resource limits
+MemoryLimit=512M
+CPUQuota=50%
+
+# Restart policy
+Restart=on-failure
+RestartSec=30s
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log/tradbot /var/lib/tradbot
+
+[Install]
+WantedBy=multi-user.target
