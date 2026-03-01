@@ -212,11 +212,20 @@ EVENT_FILTER_DATES = {
 # ============================================================================
 
 BROKER_WS_URL = 'wss://feed.pxl.finvasia.com/ws'
-BROKER_API_BASE = 'https://api.smartapi.smartbroker.com'
+# Use Flattrade / PI Connect API base; can be overridden via environment
+BROKER_API_BASE = os.getenv('FLATTRADE_API_BASE', 'https://api.flattrade.com')
 
 WEBSOCKET_HEARTBEAT_INTERVAL = 30   # Send heartbeat every 30 seconds
 WEBSOCKET_TIMEOUT = 5               # Connection timeout
 WEBSOCKET_RECONNECT_DELAY = 5       # Reconnect after 5 sec on disconnect
+# WebSocket protection
+WEBSOCKET_MISSING_TICK_THRESHOLD_SECONDS = 20  # If no tick in this many seconds during market hours
+WEBSOCKET_MAX_MISSES_BEFORE_DISABLE = 3       # Disable trading after this many consecutive reconnect failures
+
+# Token refresh settings
+TOKEN_REFRESH_MARGIN_SECONDS = 120   # Refresh token this many seconds before expiry
+TOKEN_REFRESH_MAX_RETRIES = 5
+TOKEN_REFRESH_BACKOFF_BASE = 2       # Exponential backoff multiplier
 
 # ============================================================================
 # SYSTEM BEHAVIOR & RECOVERY

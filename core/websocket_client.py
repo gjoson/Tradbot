@@ -40,6 +40,8 @@ class WebSocketClient:
         self.login_manager = login_manager
         self.ws: Optional[WebSocketClientProtocol] = None
         self.connected = False
+        self.last_tick_time: Optional[datetime] = None
+        self._missing_tick_count = 0
         
         self._subscriptions: Dict[str, Any] = {}  # token -> subscription details
         self._heartbeat_task: Optional[asyncio.Task] = None
@@ -48,6 +50,7 @@ class WebSocketClient:
         
         self._logger = logging.getLogger(f"{__name__}.WebSocketClient")
         self._message_handlers: List[Callable] = []
+        self._tick_monitor_task: Optional[asyncio.Task] = None
     
     async def connect(self) -> bool:
         """
@@ -85,6 +88,9 @@ class WebSocketClient:
             # Start receive and heartbeat tasks
             self._receive_task = asyncio.create_task(self._receive_loop())
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            # Start tick monitor
+            if self._tick_monitor_task is None or self._tick_monitor_task.done():
+                self._tick_monitor_task = asyncio.create_task(self._tick_monitor_loop())
             
             return True
         
@@ -187,7 +193,11 @@ class WebSocketClient:
                     )
                     
                     message = json.loads(message_str)
-                    
+
+                    # Update last tick time for protection
+                    self.last_tick_time = datetime.now(IST)
+                    self._missing_tick_count = 0
+
                     # Process message
                     await self._process_message(message)
                 
@@ -258,6 +268,47 @@ class WebSocketClient:
             'reason': 'max_retries_exceeded',
             'timestamp': datetime.now(IST).isoformat()
         })
+
+    async def _tick_monitor_loop(self) -> None:
+        """Monitor last tick time and trigger reconnection if ticks stop arriving."""
+        try:
+            from config.settings import WEBSOCKET_MISSING_TICK_THRESHOLD_SECONDS, WEBSOCKET_MAX_MISSES_BEFORE_DISABLE
+
+            while True:
+                await asyncio.sleep(WEBSOCKET_MISSING_TICK_THRESHOLD_SECONDS)
+
+                if not self.connected:
+                    continue
+
+                if self.last_tick_time is None:
+                    self._missing_tick_count += 1
+                else:
+                    seconds_since = (datetime.now(IST) - self.last_tick_time).total_seconds()
+                    if seconds_since > WEBSOCKET_MISSING_TICK_THRESHOLD_SECONDS:
+                        self._missing_tick_count += 1
+                    else:
+                        self._missing_tick_count = 0
+
+                if self._missing_tick_count > 0:
+                    self._logger.warning(f"No ticks for {self._missing_tick_count} intervals")
+
+                if self._missing_tick_count >= WEBSOCKET_MAX_MISSES_BEFORE_DISABLE:
+                    self._logger.critical("WebSocket failed to deliver ticks repeatedly; disabling trading")
+                    await self._emit_event(EventType.TRADING_HALTED, {
+                        'reason': 'websocket_no_ticks',
+                        'misses': self._missing_tick_count
+                    })
+                    # Attempt a reconnect once
+                    try:
+                        await self.disconnect()
+                        await self.connect()
+                    except Exception:
+                        pass
+
+        except asyncio.CancelledError:
+            self._logger.info("Tick monitor cancelled")
+        except Exception as e:
+            self._logger.error(f"Tick monitor error: {e}")
     
     async def _process_message(self, message: Dict[str, Any]) -> None:
         """Process incoming market data message."""

@@ -46,6 +46,7 @@ class BrokerInterface:
         price: float,
         order_type: str = 'LIMIT',
         product_type: str = 'MIS'
+        , client_order_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Place a single leg order.
@@ -81,6 +82,8 @@ class BrokerInterface:
                 'ordertype': side,  # For Flattrade API
                 'duration': 'DAY'
             }
+            if client_order_id:
+                payload['clientOrderId'] = client_order_id
             
             response = requests.post(url, json=payload, headers=headers, timeout=10)
             response.raise_for_status()
@@ -100,6 +103,7 @@ class BrokerInterface:
             
             return {
                 'order_id': order_id,
+                'client_order_id': client_order_id,
                 'token': token,
                 'side': side,
                 'quantity': quantity,
@@ -420,6 +424,30 @@ class BrokerInterface:
                 )
                 return pre_market
             
+            return None
+
+    async def get_open_orders(self) -> Optional[List[Dict[str, Any]]]:
+        """Fetch all open orders from broker."""
+        try:
+            if not await self.login_manager.check_session_validity():
+                return None
+
+            url = f"{BROKER_API_BASE}/order/open"
+            headers = self.login_manager.get_headers()
+
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+
+            data = response.json()
+            if data.get('status') == 200:
+                orders = data.get('data', [])
+                self._logger.debug(f"Open orders fetched: {len(orders)}")
+                return orders
+
+            return None
+
+        except Exception as e:
+            self._logger.error(f"Open orders fetch error: {e}")
             return None
         
         except Exception as e:

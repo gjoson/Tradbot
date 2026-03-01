@@ -1,0 +1,11 @@
+# Development requirements for Tradbot
+# Install with: pip install -r requirements-dev.txt
+
+pytest>=7.0.0
+pytest-asyncio>=0.20.0
+black>=23.0.0
+flake8>=5.0.0
+mypy>=1.0.0
+
+# Optional developer helpers
+ipython>=8.0.0

@@ -16,18 +16,8 @@ Group=tradbot
 
 # Working directory
 WorkingDirectory=/opt/tradbot
-
-# Environment variables
-Environment="PATH=/opt/tradbot/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
-Environment="FLATTRADE_USER="
-Environment="FLATTRADE_PASSWORD="
-Environment="FLATTRADE_API_KEY="
-Environment="FLATTRADE_API_SECRET="
-Environment="LOG_LEVEL=INFO"
-Environment="LOG_DIR=/var/log/tradbot"
-Environment="LOG_DB_PATH=/var/lib/tradbot/trades.db"
-Environment="STATE_FILE_PATH=/var/lib/tradbot/state.json"
-Environment="DRY_RUN=false"
+# Load environment from external file (managed by sysadmin)
+EnvironmentFile=/etc/tradbot.env
 
 # Execution
 ExecStart=/opt/tradbot/venv/bin/python /opt/tradbot/main.py
@@ -38,11 +28,13 @@ StandardError=journal
 SyslogIdentifier=tradbot
 
 # Resource limits
-MemoryLimit=512M
+MemoryLimit=1G
 CPUQuota=50%
+WatchdogSec=60
+TimeoutStopSec=30
 
 # Restart policy
-Restart=on-failure
+Restart=always
 RestartSec=30s
 
 # Security

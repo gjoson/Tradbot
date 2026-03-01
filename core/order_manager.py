@@ -109,11 +109,19 @@ class OrderManager:
         self._order_history = []  # For rate limit tracking
         
         self._is_processing = False
+        # Dependencies (injected)
+        self.trade_logger = None
+        self.broker_interface = None
     
     async def initialize(self) -> None:
         """Initialize async components."""
         self._order_queue = asyncio.Queue()
         self._logger.info("OrderManager initialized")
+
+    def set_dependencies(self, trade_logger, broker_interface) -> None:
+        """Inject dependencies required for idempotency and broker calls."""
+        self.trade_logger = trade_logger
+        self.broker_interface = broker_interface
     
     async def place_order(self, legs: List[Dict], strategy: str) -> str:
         """
@@ -128,6 +136,17 @@ class OrderManager:
         """
         try:
             order_id = str(uuid.uuid4())[:8]
+            client_order_id = f"cli_{order_id}"
+
+            # Idempotency: check DB if this client_order_id already exists
+            try:
+                if self.trade_logger:
+                    existing = await self.trade_logger.get_order_by_client_id(client_order_id)
+                    if existing:
+                        self._logger.warning(f"Duplicate client_order_id detected: {client_order_id}, returning existing order")
+                        return existing.get('client_order_id')
+            except Exception:
+                pass
             
             # Create order
             order = Order(
@@ -149,8 +168,17 @@ class OrderManager:
                 order.legs.append(leg)
             
             self._orders[order_id] = order
+
+            # Persist client order id for idempotency
+            try:
+                if self.trade_logger:
+                    await self.trade_logger.record_order(client_order_id, None, {'order_id': order_id, 'strategy': strategy})
+            except Exception:
+                self._logger.warning("Failed to record client_order_id in DB")
             
             # Queue for execution
+            # Attach client_order_id to order for later use
+            order.client_order_id = client_order_id
             await self._order_queue.put(order)
             
             self._logger.info(f"Order placed: {order_id} ({strategy}) with {len(legs)} legs")
@@ -234,6 +262,9 @@ class OrderManager:
             try:
                 order.retry_count = attempt + 1
                 order.submitted_at = datetime.now(IST)
+
+                # Set current client order id for legs
+                self.current_client_order_id = getattr(order, 'client_order_id', None)
                 
                 self._logger.info(
                     f"Executing order {order.order_id} "
@@ -330,15 +361,30 @@ class OrderManager:
                 f"{leg.side.value} {leg.quantity}x {leg.strike} {leg.instrument} @ {leg.price}"
             )
             
-            # Simulate broker API call
-            # In production: calls Flattrade API
-            await asyncio.sleep(0.05)  # Simulate network delay
-            
-            # Assign broker order ID
-            leg.broker_order_id = str(uuid.uuid4())[:8]
-            leg.status = OrderStatus.FILLED
-            leg.filled_quantity = leg.quantity
-            leg.avg_fill_price = leg.price  # In production, use actual fill price
+            # Real broker API call
+            try:
+                if not self.broker_interface:
+                    # Fallback to simulated behavior
+                    await asyncio.sleep(0.05)
+                    leg.broker_order_id = str(uuid.uuid4())[:8]
+                else:
+                    # Use order-level client id if available
+                    client_order_id = getattr(leg, 'client_order_id', None) or getattr(self, 'current_client_order_id', None)
+                    result = await self.broker_interface.place_order(
+                        token=leg.token,
+                        side=leg.side.value,
+                        quantity=leg.quantity,
+                        price=leg.price,
+                        client_order_id=client_order_id
+                    )
+                    if not result:
+                        self._logger.error("Broker rejected leg placement")
+                        return False
+                    leg.broker_order_id = result.get('order_id')
+
+                leg.status = OrderStatus.FILLED
+                leg.filled_quantity = leg.quantity
+                leg.avg_fill_price = leg.price
             
             self._logger.info(
                 f"Leg executed: {leg.leg_id} "

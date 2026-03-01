@@ -10,10 +10,7 @@ numpy>=1.24.0
 pandas>=1.5.0
 
 # Broker/API
-SmartApi>=1.3.0
-
-# Data & Storage
-sqlite3  # Built-in
+# (Flattrade integration uses REST endpoints configured via environment)
 
 # Utilities
 python-dateutil>=2.8.0
@@ -24,11 +21,6 @@ pyyaml>=6.0
 python-json-logger>=2.0.0
 
 # Optional: For production deployment
-gunicorn>=20.1.0
+# (web server removed; not required for core bot)
 
-# Development (optional)
-pytest>=7.0.0
-pytest-asyncio>=0.20.0
-black>=23.0.0
-flake8>=5.0.0
-mypy>=1.0.0
+# Development (optional) - developer tooling moved to requirements-dev.txt

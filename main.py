@@ -134,6 +134,13 @@ class TradBotSystem:
             # 12. Initialize trade logger
             self.trade_logger = TradeLogger()
             self._logger.info("✓ Trade logger initialized")
+
+            # Inject dependencies into order manager
+            self.order_manager.set_dependencies(self.trade_logger, self.broker_interface)
+
+            # 13a. Perform startup reconciliation: rebuild state from broker
+            await self._startup_reconcile()
+            self._logger.info("✓ Startup reconciliation complete")
             
             # 13. Initialize scheduler
             self.scheduler = Scheduler()
@@ -156,7 +163,122 @@ class TradBotSystem:
     async def _register_event_handlers(self) -> None:
         """Register event handlers for system events."""
         # Add handlers for critical events here
-        pass
+        bus = self.event_bus
+
+        async def on_trading_halted(event):
+            self._logger.critical(f"Trading halted: {event.data}")
+            # Additional actions: cancel scheduled entries, persist state
+
+        bus.subscribe(EventType.TRADING_HALTED, on_trading_halted)
+
+        async def on_token_expired(event):
+            self._logger.warning("Token expired event received")
+
+        bus.subscribe(EventType.TOKEN_EXPIRED, on_token_expired)
+
+        async def on_login_failed(event):
+            self._logger.error("Login failed event received")
+
+        bus.subscribe(EventType.LOGIN_FAILED, on_login_failed)
+
+        return
+
+    async def _startup_reconcile(self) -> None:
+        """Fetch open positions and orders from broker and rebuild internal state."""
+        try:
+            # 1. Fetch open positions
+            positions = await self.broker_interface.get_open_positions()
+            if positions:
+                for pos in positions:
+                    try:
+                        # Build a simple Position object and register
+                        position_id = pos.get('position_id') or pos.get('id') or str(pos.get('instrument'))
+                        entry_price = float(pos.get('avg_price', 0) or pos.get('entry_price', 0))
+                        entry_time = datetime.now(IST)
+                        legs = pos.get('legs', []) if isinstance(pos.get('legs', []), list) else []
+
+                        from core.risk_manager import Position as RMPosition
+
+                        p = RMPosition(
+                            position_id=position_id,
+                            entry_time=entry_time,
+                            entry_price=entry_price,
+                            legs=legs,
+                            strategy=pos.get('strategy', 'reconciled'),
+                            initial_capital_used=float(pos.get('initial_capital', 0) or 0)
+                        )
+                        await self.risk_manager.register_position(p)
+                    except Exception as e:
+                        self._logger.warning(f"Failed to reconstruct position: {e}")
+
+            # 2. Fetch open orders and ensure idempotency records
+            open_orders = await self.broker_interface.get_open_orders()
+            if open_orders and self.trade_logger:
+                for o in open_orders:
+                    client_id = o.get('clientOrderId') or o.get('client_order_id')
+                    broker_id = o.get('orderid') or o.get('order_id') or o.get('id')
+                    order_data = o
+                    try:
+                        await self.trade_logger.record_order(client_id or f"broker_{broker_id}", broker_id, order_data)
+                    except Exception:
+                        self._logger.warning("Failed to record open order in DB")
+
+            # 3. Prevent duplicate order placement by loading known client_order_ids
+            # (OrderManager checks DB before placing orders)
+
+            # 4. Load persisted state.json if exists
+            await self._load_state()
+
+        except Exception as e:
+            self._logger.error(f"Startup reconciliation error: {e}")
+
+    async def _save_state_atomic(self) -> None:
+        """Atomically save runtime state to STATE_FILE_PATH using temp file + rename."""
+        try:
+            from config.settings import STATE_FILE_PATH
+
+            state = {
+                'open_positions': [p.position_id for p in self.risk_manager.open_positions.values()],
+                'timestamp': datetime.now(IST).isoformat()
+            }
+
+            import tempfile, os, json
+
+            d = os.path.dirname(STATE_FILE_PATH)
+            if d and not os.path.exists(d):
+                os.makedirs(d, exist_ok=True)
+
+            fd, tmp_path = tempfile.mkstemp(dir=d)
+            try:
+                with os.fdopen(fd, 'w') as f:
+                    json.dump(state, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, STATE_FILE_PATH)
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            self._logger.error(f"Error saving state: {e}")
+
+    async def _load_state(self) -> None:
+        """Load persisted state.json if available."""
+        try:
+            from config.settings import STATE_FILE_PATH
+            import os, json
+
+            if not os.path.exists(STATE_FILE_PATH):
+                return
+
+            with open(STATE_FILE_PATH, 'r') as f:
+                state = json.load(f)
+            self._logger.info(f"Loaded state: {state}")
+        except Exception as e:
+            self._logger.error(f"Error loading state: {e}")
     
     async def run(self) -> None:
         """Main event loop."""

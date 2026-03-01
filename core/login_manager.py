@@ -42,6 +42,9 @@ class LoginManager:
         self.session = None
         self.broker_session_id = None
         self.last_activity = datetime.now(IST)
+        self.token_expiry = None  # datetime when token expires
+        self._refresh_task: Optional[asyncio.Task] = None
+        self._disabled = False
         self._logger = logging.getLogger(f"{__name__}.LoginManager")
     
     async def login(self) -> bool:
@@ -75,9 +78,19 @@ class LoginManager:
                 })
                 return False
             
-            # Extract auth token
+            # Extract auth token and expiry
             self.auth_token = data.get('data', {}).get('authToken')
             self.broker_session_id = data.get('data', {}).get('sessionId')
+            # Some brokers provide expires_in seconds
+            expires_in = data.get('data', {}).get('expires_in') or data.get('data', {}).get('expiry_seconds')
+            try:
+                if expires_in:
+                    self.token_expiry = datetime.now(IST) + timedelta(seconds=int(expires_in))
+                else:
+                    # Default to one hour if not provided
+                    self.token_expiry = datetime.now(IST) + timedelta(seconds=3600)
+            except Exception:
+                self.token_expiry = datetime.now(IST) + timedelta(seconds=3600)
             
             if not self.auth_token:
                 self._logger.error("No auth token in response")
@@ -91,6 +104,10 @@ class LoginManager:
                 'user': self.user,
                 'session_id': self.broker_session_id
             })
+
+            # Start background token refresher
+            if self._refresh_task is None or self._refresh_task.done():
+                self._refresh_task = asyncio.create_task(self._token_refresher_loop())
             
             return True
         
@@ -120,6 +137,13 @@ class LoginManager:
             
             self.auth_token = None
             self.broker_session_id = None
+            self.token_expiry = None
+            # cancel refresher
+            if self._refresh_task:
+                try:
+                    self._refresh_task.cancel()
+                except Exception:
+                    pass
             self._logger.info("Logout successful")
             return True
         
@@ -146,6 +170,23 @@ class LoginManager:
             await self.logout()
             return await self.login()
         
+        # If token is near expiry, attempt refresh
+        try:
+            from config.settings import TOKEN_REFRESH_MARGIN_SECONDS
+
+            if self.token_expiry:
+                seconds_left = (self.token_expiry - datetime.now(IST)).total_seconds()
+                if seconds_left < TOKEN_REFRESH_MARGIN_SECONDS:
+                    self._logger.info(f"Token expiring in {seconds_left:.0f}s, attempting refresh")
+                    refreshed = await self._refresh_token()
+                    if not refreshed:
+                        self._logger.warning("Token refresh failed during session check")
+                        await self._emit_event(EventType.TRADING_HALTED, {'reason': 'auth_lost'})
+                        return False
+
+        except Exception:
+            pass
+
         # Verify token with broker (optional heartbeat)
         try:
             url = f"{BROKER_API_BASE}/auth/validate"
@@ -169,6 +210,75 @@ class LoginManager:
         await self._emit_event(EventType.TOKEN_EXPIRED, {
             'timestamp': datetime.now(IST).isoformat()
         })
+
+    async def _refresh_token(self) -> bool:
+        """Attempt to refresh token using exponential backoff."""
+        try:
+            from config.settings import TOKEN_REFRESH_MAX_RETRIES, TOKEN_REFRESH_BACKOFF_BASE
+
+            attempt = 0
+            while attempt < TOKEN_REFRESH_MAX_RETRIES:
+                try:
+                    self._logger.info(f"Refreshing auth token (attempt {attempt+1})")
+                    # Some brokers provide dedicated refresh endpoint; fall back to login
+                    url = f"{BROKER_API_BASE}/auth/refresh"
+                    headers = self._build_headers()
+                    payload = {}
+                    resp = requests.post(url, headers=headers, timeout=10)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        new_token = data.get('data', {}).get('authToken')
+                        expires_in = data.get('data', {}).get('expires_in')
+                        if new_token:
+                            self.auth_token = new_token
+                            if expires_in:
+                                self.token_expiry = datetime.now(IST) + timedelta(seconds=int(expires_in))
+                            self._logger.info("Token refreshed successfully")
+                            await self._emit_event(EventType.LOGIN_SUCCESS, {'refreshed': True})
+                            return True
+                    # fallback to full login
+                    ok = await self.login()
+                    if ok:
+                        return True
+                except Exception as e:
+                    self._logger.warning(f"Token refresh attempt failed: {e}")
+
+                attempt += 1
+                await asyncio.sleep((TOKEN_REFRESH_BACKOFF_BASE ** attempt))
+
+            # If here, refresh failed
+            self._logger.error("Token refresh failed after retries; disabling trading")
+            await self._emit_event(EventType.TRADING_HALTED, {'reason': 'auth_refresh_failed'})
+            self._disabled = True
+            return False
+
+        except Exception as e:
+            self._logger.error(f"Unexpected error in _refresh_token: {e}")
+            return False
+
+    async def _token_refresher_loop(self) -> None:
+        """Background loop to refresh token before expiry."""
+        try:
+            from config.settings import TOKEN_REFRESH_MARGIN_SECONDS
+
+            while True:
+                if not self.token_expiry:
+                    await asyncio.sleep(30)
+                    continue
+
+                seconds_left = (self.token_expiry - datetime.now(IST)).total_seconds()
+                sleep_time = max(10, seconds_left - TOKEN_REFRESH_MARGIN_SECONDS)
+                await asyncio.sleep(sleep_time)
+
+                # Attempt refresh
+                refreshed = await self._refresh_token()
+                if not refreshed:
+                    # If refresh fails, try again after backoff inside _refresh_token
+                    break
+        except asyncio.CancelledError:
+            self._logger.info("Token refresher cancelled")
+        except Exception as e:
+            self._logger.error(f"Token refresher loop error: {e}")
     
     def _build_headers(self) -> Dict[str, str]:
         """Build API request headers with auth token."""

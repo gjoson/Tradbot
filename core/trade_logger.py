@@ -65,6 +65,18 @@ class TradeLogger:
             """
             
             cursor.execute(create_table_sql)
+
+            # Create orders table for idempotency
+            create_orders_sql = """
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_order_id TEXT NOT NULL UNIQUE,
+                broker_order_id TEXT,
+                order_data TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+            cursor.execute(create_orders_sql)
             
             # Create no-trade days table
             create_notrade_sql = """
@@ -168,6 +180,35 @@ class TradeLogger:
         
         except Exception as e:
             self._logger.error(f"Error logging trade: {e}")
+            return None
+
+    async def record_order(self, client_order_id: str, broker_order_id: str = None, order_data: dict = None) -> bool:
+        """Record an order for idempotency checks. Uses transaction."""
+        try:
+            cursor = self._connection.cursor()
+            insert_sql = """
+            INSERT OR IGNORE INTO orders (client_order_id, broker_order_id, order_data)
+            VALUES (?, ?, ?)
+            """
+            cursor.execute(insert_sql, (client_order_id, broker_order_id, json.dumps(order_data or {})))
+            self._connection.commit()
+            return True
+        except Exception as e:
+            self._logger.error(f"Error recording order: {e}")
+            return False
+
+    async def get_order_by_client_id(self, client_order_id: str) -> Optional[Dict]:
+        """Retrieve order record by client_order_id."""
+        try:
+            cursor = self._connection.cursor()
+            cursor.execute("SELECT * FROM orders WHERE client_order_id = ?", (client_order_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            columns = [desc[0] for desc in cursor.description]
+            return dict(zip(columns, row))
+        except Exception as e:
+            self._logger.error(f"Error fetching order by client id: {e}")
             return None
     
     async def log_no_trade_day(self, date: str, reason: str) -> bool:
